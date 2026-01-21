@@ -86,11 +86,11 @@ public class DiskMoveMenu extends AbstractContainerMenu {
 
     // --- 3. 快速移动逻辑 (Shift + 左键) ---
     @Override
-    public ItemStack quickMoveStack(Player playerIn, int index) {
+    public @NotNull ItemStack quickMoveStack(@NotNull Player playerIn, int index) {
         ItemStack sourceStack = ItemStack.EMPTY;
         Slot sourceSlot = this.slots.get(index);
 
-        if (sourceSlot != null && sourceSlot.hasItem()) {
+        if (sourceSlot.hasItem()) {
             ItemStack stackInSlot = sourceSlot.getItem();
             sourceStack = stackInSlot.copy();
 
@@ -126,7 +126,7 @@ public class DiskMoveMenu extends AbstractContainerMenu {
     }
 
     @Override
-    public boolean stillValid(Player pPlayer) {
+    public boolean stillValid(@NotNull Player pPlayer) {
         return stillValid(levelAccess, pPlayer, RSDiskMove.DISK_MOVER_BLOCK.get());
     }
 }

@@ -14,6 +14,7 @@ import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.material.MapColor;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.common.extensions.IForgeMenuType;
+import net.minecraftforge.event.BuildCreativeModeTabContentsEvent;
 import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent;
@@ -47,7 +48,8 @@ public class RSDiskMove {
     public static final DeferredRegister<MenuType<?>> MENUS = DeferredRegister.create(ForgeRegistries.MENU_TYPES, MOD_ID);
 
     public static final RegistryObject<Block> DISK_MOVER_BLOCK = BLOCKS.register("disk_mover",
-            () -> new DiskMoverBlock(BlockBehaviour.Properties.of().mapColor(MapColor.METAL).strength(2.0f)));
+            () -> new DiskMoverBlock(BlockBehaviour.Properties.of().mapColor(MapColor.METAL).strength(2.0f)
+                    .lightLevel(state -> state.getValue(DiskMoverBlock.LIT) ? 15 : 0))); // 修改：根据 LIT 状态设置亮度
 
     public static final RegistryObject<Item> DISK_MOVER_ITEM = ITEMS.register("disk_mover",
             () -> new BlockItem(DISK_MOVER_BLOCK.get(), new Item.Properties()));
@@ -77,6 +79,7 @@ public class RSDiskMove {
         MENUS.register(modEventBus);
         modEventBus.addListener(this::commonSetup);
         modEventBus.addListener(this::clientSetup);
+        modEventBus.addListener(this::buildContents);
         MinecraftForge.EVENT_BUS.register(this);
     }
 
@@ -87,5 +90,11 @@ public class RSDiskMove {
     private void clientSetup(final FMLClientSetupEvent event) {
         MenuScreens.register(DISK_MOVER_MENU.get(), DiskMoveScreen::new);
         MenuScreens.register(SIDE_CONFIG_MENU.get(), SideConfigScreen::new);
+    }
+
+    private void buildContents(BuildCreativeModeTabContentsEvent event) {
+        if (event.getTabKey().location().equals(new ResourceLocation("refinedstorage", "general"))) {
+            event.accept(DISK_MOVER_ITEM.get());
+        }
     }
 }

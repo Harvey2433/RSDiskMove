@@ -4,7 +4,7 @@
 
   "gui.rs_disk_move.title": "RS Disk Mover",
   "gui.rs_disk_move.start": "Start",
-  "gui.rs_disk_move.stop": "Stop",
+  "gui.rs_disk_move.stop": "Pause",
   "gui.rs_disk_move.resume": "Resume",
   "gui.rs_disk_move.finished": "Finished",
   "gui.rs_disk_move.idle": "Idle",

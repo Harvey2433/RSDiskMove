@@ -4,10 +4,10 @@
 
   "gui.rs_disk_move.title": "RS 磁碟搬運器",
   "gui.rs_disk_move.start": "開始",
-  "gui.rs_disk_move.stop": "停止",
+  "gui.rs_disk_move.stop": "暫停",
   "gui.rs_disk_move.resume": "繼續",
   "gui.rs_disk_move.finished": "已完成",
-  "gui.rs_disk_move.idle": "閒置中",
+  "gui.rs_disk_move.idle": "Idle",
   "gui.rs_disk_move.progress_format": "%s%% (%s / %s)",
   "gui.rs_disk_move.config_tooltip": "I/O 側配置",
 

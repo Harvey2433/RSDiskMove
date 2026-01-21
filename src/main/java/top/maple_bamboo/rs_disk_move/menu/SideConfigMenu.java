@@ -6,6 +6,7 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.*;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.entity.BlockEntity;
+import org.jetbrains.annotations.NotNull;
 import top.maple_bamboo.rs_disk_move.RSDiskMove;
 import top.maple_bamboo.rs_disk_move.block.DiskMoverBlockEntity;
 
@@ -36,10 +37,10 @@ public class SideConfigMenu extends AbstractContainerMenu {
     public int getSideConfig() { return this.data.get(0); }
 
     @Override
-    public ItemStack quickMoveStack(Player player, int index) { return ItemStack.EMPTY; }
+    public @NotNull ItemStack quickMoveStack(@NotNull Player player, int index) { return ItemStack.EMPTY; }
 
     @Override
-    public boolean stillValid(Player player) {
+    public boolean stillValid(@NotNull Player player) {
         return stillValid(levelAccess, player, RSDiskMove.DISK_MOVER_BLOCK.get());
     }
 }

@@ -37,17 +37,55 @@ import top.maple_bamboo.rs_disk_move.menu.DiskMoveMenu;
 import java.util.*;
 
 public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
+    private static final int MAX_STACKS_CHECKED_PER_TICK = 81920;
+
+    // 1. 内部 Handler：供 GUI 使用
+    // 逻辑：机器运行时锁定，停机时可自由操作
     private final ItemStackHandler itemHandler = new ItemStackHandler(6) {
         @Override
         protected void onContentsChanged(int slot) {
             setChanged();
             inventoryChanged = true;
         }
+        @Override
+        public boolean isItemValid(int slot, @NotNull ItemStack stack) {
+            return stack.getItem() instanceof IStorageDiskProvider;
+        }
+        @Override
+        public @NotNull ItemStack insertItem(int slot, @NotNull ItemStack stack, boolean simulate) {
+            if (isTransferring) return stack; // 运行时拒绝插入
+            return super.insertItem(slot, stack, simulate);
+        }
+        @Override
+        public @NotNull ItemStack extractItem(int slot, int amount, boolean simulate) {
+            if (isTransferring) return ItemStack.EMPTY; // 运行时拒绝提取
+            return super.extractItem(slot, amount, simulate);
+        }
+    };
+
+    // 2. 新增自动化 Handler：供管道/漏斗使用
+    // 逻辑：永远拒绝任何插入和提取
+    private final IItemHandler automationItemHandler = new IItemHandler() {
+        @Override public int getSlots() { return itemHandler.getSlots(); }
+        @Override public @NotNull ItemStack getStackInSlot(int slot) { return itemHandler.getStackInSlot(slot); }
+        // 永远拒绝插入
+        @Override public @NotNull ItemStack insertItem(int slot, @NotNull ItemStack stack, boolean simulate) { return stack; }
+        // 永远拒绝提取
+        @Override public @NotNull ItemStack extractItem(int slot, int amount, boolean simulate) { return ItemStack.EMPTY; }
+        @Override public int getSlotLimit(int slot) { return itemHandler.getSlotLimit(slot); }
+        @Override public boolean isItemValid(int slot, @NotNull ItemStack stack) { return false; }
     };
 
     private LazyOptional<IItemHandler> lazyItemHandler = LazyOptional.empty();
+    private LazyOptional<IItemHandler> lazyAutomationItemHandler = LazyOptional.empty(); // 新增 Automation LazyOptional
+
     private int sideConfig = 0b111111;
     private boolean isTransferring = false;
+
+    // 性能优化：Capability 缓存
+    private final Map<Direction, LazyOptional<IItemHandler>> itemHandlerCache = new EnumMap<>(Direction.class);
+    private final Map<Direction, LazyOptional<IFluidHandler>> fluidHandlerCache = new EnumMap<>(Direction.class);
+    private boolean needCacheUpdate = true;
 
     // 显示数据
     private long displayTotal = 0;
@@ -64,13 +102,14 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
     private boolean inventoryChanged = false;
     private UUID ownerUUID;
 
-    // 计时器
+    // 计时器 (保留原有定义，不做删改)
     private int itemStallTimer = 0;
     private int itemNoContainerTimer = 0;
     private int fluidStallTimer = 0;
     private int fluidNoContainerTimer = 0;
     private int transitionTimer = 0;
     private int autoResetTimer = 0;
+    private int litUpdateCooldown = 0;
 
     public final ContainerData data = new ContainerData() {
         @Override
@@ -115,6 +154,20 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
     public static void tick(Level level, BlockPos ignoredPos, BlockState ignoredState, DiskMoverBlockEntity be) {
         if (level.isClientSide) return;
 
+        // 缓存更新检查
+        if (be.needCacheUpdate) {
+            be.updateNeighborCache((ServerLevel) level);
+            be.needCacheUpdate = false;
+        }
+
+        // 光照延迟更新 (保留原有逻辑)
+        if (be.litUpdateCooldown > 0) {
+            be.litUpdateCooldown--;
+            if (be.litUpdateCooldown == 0) {
+                be.syncLitState();
+            }
+        }
+
         if (be.isTransferring) {
             be.displayTotal = be.currentPhaseTotal;
             be.displayMoved = be.currentPhaseMoved;
@@ -131,6 +184,26 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
                 if (be.autoResetTimer == 0) be.resetAll();
             }
         }
+    }
+
+    // --- 缓存逻辑 ---
+    private void updateNeighborCache(ServerLevel level) {
+        itemHandlerCache.clear();
+        fluidHandlerCache.clear();
+        for (Direction dir : Direction.values()) {
+            BlockEntity neighbor = level.getBlockEntity(this.worldPosition.relative(dir));
+            if (neighbor != null) {
+                itemHandlerCache.put(dir, neighbor.getCapability(ForgeCapabilities.ITEM_HANDLER, dir.getOpposite()));
+                fluidHandlerCache.put(dir, neighbor.getCapability(ForgeCapabilities.FLUID_HANDLER, dir.getOpposite()));
+            } else {
+                itemHandlerCache.put(dir, LazyOptional.empty());
+                fluidHandlerCache.put(dir, LazyOptional.empty());
+            }
+        }
+    }
+
+    public void onNeighborChanged() {
+        this.needCacheUpdate = true;
     }
 
     // --- Phase 0: 物品阶段 ---
@@ -161,7 +234,14 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
                 }
             } else {
                 itemStallTimer++;
-                if (itemStallTimer >= 200) { // 10s
+                if (itemStallTimer > 20) {
+                    needCacheUpdate = true;
+                }
+                if (itemStallTimer > 60 && hasValidItemTargets(level)) {
+                    pauseTransfer(Component.translatable("message.rs_disk_move.paused_no_item_container"));
+                    return;
+                }
+                if (itemStallTimer >= 100) {
                     pauseTransfer(Component.translatable("message.rs_disk_move.paused_item_target_full"));
                 }
             }
@@ -193,72 +273,74 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
     }
 
     // --- Phase 2: 流体阶段 ---
+    // 逻辑优化：对齐 tickItemPhase，移除复杂状态码，复用现有计时器
     private void tickFluidPhase(ServerLevel level) {
-        FluidStack testFluid = getFirstFluidStack(level);
-        if (testFluid == null || testFluid.isEmpty()) {
-            finishTransfer(Component.translatable("message.rs_disk_move.complete_all"));
-            return;
-        }
-
-        int status = checkFluidTargets(level, testFluid);
-
-        if (status == 2) {
-            long moved = transferFluids(level);
-            this.currentPhaseMoved += moved;
-
-            fluidNoContainerTimer = 0;
-            fluidStallTimer = 0;
-
-            if (moved == 0) fluidStallTimer++;
-            setChanged();
-        }
-        else if (status == 1) {
-            fluidNoContainerTimer = 0;
-            fluidStallTimer++;
-            if (fluidStallTimer >= 100) {
-                pauseTransfer(Component.translatable("message.rs_disk_move.paused_fluid_target_full"));
-            }
-        }
-        else {
-            fluidStallTimer = 0;
+        // 1. 预检测：无容器 (使用 fluidNoContainerTimer)
+        if (hasValidFluidTargets(level)) {
             fluidNoContainerTimer++;
             if (fluidNoContainerTimer > 40) {
                 pauseTransfer(Component.translatable("message.rs_disk_move.paused_no_fluid_container"));
             }
+            return;
+        } else {
+            fluidNoContainerTimer = 0;
+        }
+
+        // 2. 尝试传输
+        long moved = transferFluids(level);
+        this.currentPhaseMoved += moved;
+
+        if (moved == 0) {
+            FluidStack testFluid = getFirstFluidStack(level);
+            // 3. 判断是否完成
+            if (testFluid == null || testFluid.isEmpty()) {
+                finishTransfer(Component.translatable("message.rs_disk_move.complete_all"));
+            } else {
+                // 4. 判断堵塞 (使用 fluidStallTimer)
+                fluidStallTimer++;
+                if (fluidStallTimer > 20) {
+                    needCacheUpdate = true;
+                }
+                if (fluidStallTimer > 60 && hasValidFluidTargets(level)) {
+                    pauseTransfer(Component.translatable("message.rs_disk_move.paused_no_fluid_container"));
+                    return;
+                }
+                if (fluidStallTimer >= 100) {
+                    pauseTransfer(Component.translatable("message.rs_disk_move.paused_fluid_target_full"));
+                }
+            }
+        } else {
+            fluidStallTimer = 0;
+            setChanged();
         }
     }
 
-    private int checkFluidTargets(ServerLevel level, FluidStack stack) {
-        boolean foundFullHandler = false;
-
+    // 重构：替换原 checkFluidTargets，逻辑与 hasValidItemTargets 保持一致 (返回 true 表示无目标)
+    private boolean hasValidFluidTargets(ServerLevel level) {
+        if (needCacheUpdate) updateNeighborCache(level);
         for (Direction dir : Direction.values()) {
-            if (!isSideEnabled(dir)) continue;
-
-            BlockEntity be = level.getBlockEntity(this.worldPosition.relative(dir));
-            if (be == null) continue;
-
-            LazyOptional<IFluidHandler> cap = be.getCapability(ForgeCapabilities.FLUID_HANDLER, dir.getOpposite());
-            if (!cap.isPresent()) continue;
-
-            IFluidHandler handler = cap.orElse(null);
-
-            int simulated = handler.fill(stack, IFluidHandler.FluidAction.SIMULATE);
-            if (simulated > 0) return 2;
-
-            if (handler.getTanks() > 0) {
-                for (int i = 0; i < handler.getTanks(); i++) {
-                    if (handler.getFluidInTank(i).getAmount() >= handler.getTankCapacity(i)) {
-                        foundFullHandler = true;
-                    }
-                }
+            if (isSideEnabled(dir)) {
+                LazyOptional<IFluidHandler> cap = fluidHandlerCache.getOrDefault(dir, LazyOptional.empty());
+                if (cap.isPresent()) return false; // 找到目标，返回 false
             }
         }
-
-        if (foundFullHandler) return 1;
-        return 0;
+        return true; // 未找到目标
     }
 
     // ================== 控制逻辑 ==================
+
+    private void requestLitUpdate() {
+        this.litUpdateCooldown = 3;
+    }
+
+    private void syncLitState() {
+        if (this.level != null && !this.level.isClientSide) {
+            BlockState state = this.level.getBlockState(this.worldPosition);
+            if (state.hasProperty(DiskMoverBlock.LIT) && state.getValue(DiskMoverBlock.LIT) != this.isTransferring) {
+                this.level.setBlock(this.worldPosition, state.setValue(DiskMoverBlock.LIT, this.isTransferring), 3);
+            }
+        }
+    }
 
     public void toggleTransfer() {
         if (this.level == null || this.level.isClientSide) return;
@@ -267,10 +349,14 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
             this.autoResetTimer = 0;
             resetAll();
             this.isTransferring = false;
+            requestLitUpdate();
             return;
         }
 
         if (this.isTransferring) {
+            this.isTransferring = false;
+            requestLitUpdate();
+            setChanged();
             return;
         }
 
@@ -307,8 +393,8 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
 
                 FluidStack testFluid = getFirstFluidStack((ServerLevel) level);
                 if (testFluid != null) {
-                    int status = checkFluidTargets((ServerLevel) level, testFluid);
-                    if (status == 0) {
+                    // 使用新的 hasValidFluidTargets 替代复杂的 checkFluidTargets
+                    if (hasValidFluidTargets((ServerLevel) level)) {
                         notifyOwner(Component.translatable("message.rs_disk_move.error_no_fluid_container"));
                         return;
                     }
@@ -321,19 +407,23 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
         this.itemNoContainerTimer = 0;
         this.fluidStallTimer = 0;
         this.fluidNoContainerTimer = 0;
+        requestLitUpdate();
         setChanged();
     }
 
     private void pauseTransfer(Component msg) {
         this.isTransferring = false;
-        notifyOwner(msg);
+        requestLitUpdate();
         setChanged();
+        notifyOwner(msg);
+
     }
 
     private void finishTransfer(Component msg) {
         this.isTransferring = false;
         this.currentPhaseMoved = this.currentPhaseTotal;
         this.displayMoved = this.displayTotal;
+        requestLitUpdate();
         notifyOwner(msg);
         this.autoResetTimer = 60;
         setChanged();
@@ -341,6 +431,7 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
 
     private void resetAll() {
         this.isTransferring = false;
+        requestLitUpdate();
         this.displayTotal = 0;
         this.displayMoved = 0;
         this.currentPhaseTotal = 0;
@@ -362,7 +453,6 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
 
     // ================== 计算辅助方法 (核心去重) ==================
 
-    // 核心修改：使用 Set<UUID> 记录已处理的磁盘 ID，防止重复统计
     private void calculateSeparatedTotals() {
         this.totalItemCount = 0;
         this.totalFluidCount = 0;
@@ -375,12 +465,11 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
             ItemStack diskStack = itemHandler.getStackInSlot(i);
             if (!diskStack.isEmpty() && diskStack.getItem() instanceof IStorageDiskProvider provider && provider.isValid(diskStack)) {
                 UUID diskId = provider.getId(diskStack);
-                // 核心去重逻辑：如果这个 ID 已经算过了，直接跳过
                 if (processedIds.contains(diskId)) continue;
                 processedIds.add(diskId);
 
                 try {
-                    IStorageDisk disk = api.getStorageDiskManager((ServerLevel) level).get(diskId);
+                    IStorageDisk<?> disk = api.getStorageDiskManager((ServerLevel) level).get(diskId);
                     if (disk != null) {
                         for (Object obj : disk.getStacks()) {
                             if (obj instanceof ItemStack stack) this.totalItemCount += stack.getCount();
@@ -392,7 +481,6 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
         }
     }
 
-    // 计算流体总量 (也需要去重，防止流体阶段计算错误)
     private long calculateFluidTotal() {
         long amount = 0;
         IRSAPI api = RSDiskMove.RS_API;
@@ -408,7 +496,7 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
                 processedIds.add(diskId);
 
                 try {
-                    IStorageDisk disk = api.getStorageDiskManager((ServerLevel) level).get(diskId);
+                    var disk = api.getStorageDiskManager((ServerLevel) level).get(diskId);
                     if (disk != null) {
                         for (Object obj : disk.getStacks()) {
                             if (obj instanceof FluidStack stack) amount += stack.getAmount();
@@ -421,32 +509,30 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
     }
 
     private boolean hasValidItemTargets(ServerLevel level) {
+        if (needCacheUpdate) updateNeighborCache(level);
+
         for (Direction dir : Direction.values()) {
             if (isSideEnabled(dir)) {
-                BlockEntity targetBe = level.getBlockEntity(this.worldPosition.relative(dir));
-                if (targetBe != null && targetBe.getCapability(ForgeCapabilities.ITEM_HANDLER, dir.getOpposite()).isPresent()) {
-                    return false;
-                }
+                LazyOptional<IItemHandler> cap = itemHandlerCache.getOrDefault(dir, LazyOptional.empty());
+                if (cap.isPresent()) return false;
             }
         }
         return true;
     }
 
-    private boolean hasItemsLeft(ServerLevel level) { return checkDiskContent(level, ItemStack.class); }
-    private boolean hasFluidsLeft(ServerLevel level) { return checkDiskContent(level, FluidStack.class); }
+    private boolean hasItemsLeft(ServerLevel level) { return checkDiskContent(level); }
 
-    private boolean checkDiskContent(ServerLevel level, Class<?> type) {
+    private boolean checkDiskContent(ServerLevel level) {
         IRSAPI api = RSDiskMove.RS_API;
         if (api == null) return false;
-        // 这里的检查不需要去重，只要有一个盘里有东西就返回 true
         for (int i = 0; i < 6; i++) {
             ItemStack diskStack = itemHandler.getStackInSlot(i);
             if (!diskStack.isEmpty() && diskStack.getItem() instanceof IStorageDiskProvider provider && provider.isValid(diskStack)) {
                 try {
-                    IStorageDisk disk = api.getStorageDiskManager(level).get(provider.getId(diskStack));
+                    var disk = api.getStorageDiskManager(level).get(provider.getId(diskStack));
                     if (disk != null) {
                         for (Object obj : disk.getStacks()) {
-                            if (type.isInstance(obj)) return true;
+                            if (obj instanceof ItemStack) return true;
                         }
                     }
                 } catch (Exception ignored) {}
@@ -462,7 +548,7 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
             ItemStack diskStack = itemHandler.getStackInSlot(i);
             if (!diskStack.isEmpty() && diskStack.getItem() instanceof IStorageDiskProvider provider && provider.isValid(diskStack)) {
                 try {
-                    IStorageDisk disk = api.getStorageDiskManager(level).get(provider.getId(diskStack));
+                    var disk = api.getStorageDiskManager(level).get(provider.getId(diskStack));
                     if (disk != null) {
                         for (Object obj : disk.getStacks()) {
                             if (obj instanceof FluidStack stack) return stack;
@@ -474,28 +560,36 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
         return null;
     }
 
-    // 转移逻辑不需要去重，因为 extract 操作是原子性的，从A盘取出后B盘自然就没了
     private long transferItems(ServerLevel level) {
         IRSAPI api = RSDiskMove.RS_API;
         if (api == null) return 0;
+
         List<IItemHandler> targets = new ArrayList<>();
+        if (needCacheUpdate) updateNeighborCache(level);
         for (Direction dir : Direction.values()) {
             if (isSideEnabled(dir)) {
-                BlockEntity targetBe = level.getBlockEntity(this.worldPosition.relative(dir));
-                if (targetBe != null) targetBe.getCapability(ForgeCapabilities.ITEM_HANDLER, dir.getOpposite()).ifPresent(targets::add);
+                LazyOptional<IItemHandler> cap = itemHandlerCache.getOrDefault(dir, LazyOptional.empty());
+                cap.ifPresent(targets::add);
             }
         }
         if (targets.isEmpty()) return 0;
 
         long movedCount = 0;
+        int operationsChecked = 0; // 性能限制计数器
+
         for (int i = 0; i < 6; i++) {
+            if (operationsChecked >= MAX_STACKS_CHECKED_PER_TICK) break;
+
             ItemStack diskStack = itemHandler.getStackInSlot(i);
             if (!diskStack.isEmpty() && diskStack.getItem() instanceof IStorageDiskProvider provider && provider.isValid(diskStack)) {
                 try {
-                    IStorageDisk disk = api.getStorageDiskManager(level).get(provider.getId(diskStack));
+                    IStorageDisk<ItemStack> disk = (IStorageDisk<ItemStack>) api.getStorageDiskManager(level).get(provider.getId(diskStack));
                     if (disk == null) continue;
-                    Collection stacks = disk.getStacks();
+                    var stacks = disk.getStacks();
                     for (Object obj : new ArrayList<>(stacks)) {
+                        if (operationsChecked >= MAX_STACKS_CHECKED_PER_TICK) break;
+                        operationsChecked++;
+
                         if (!(obj instanceof ItemStack stackInDisk) || stackInDisk.isEmpty()) continue;
                         ItemStack toInsert = ItemHandlerHelper.copyStackWithSize(stackInDisk, stackInDisk.getCount());
                         for (IItemHandler target : targets) {
@@ -520,24 +614,33 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
     private long transferFluids(ServerLevel level) {
         IRSAPI api = RSDiskMove.RS_API;
         if (api == null) return 0;
+
         List<IFluidHandler> targets = new ArrayList<>();
+        if (needCacheUpdate) updateNeighborCache(level);
         for (Direction dir : Direction.values()) {
             if (isSideEnabled(dir)) {
-                BlockEntity targetBe = level.getBlockEntity(this.worldPosition.relative(dir));
-                if (targetBe != null) targetBe.getCapability(ForgeCapabilities.FLUID_HANDLER, dir.getOpposite()).ifPresent(targets::add);
+                LazyOptional<IFluidHandler> cap = fluidHandlerCache.getOrDefault(dir, LazyOptional.empty());
+                cap.ifPresent(targets::add);
             }
         }
         if (targets.isEmpty()) return 0;
 
         long movedCount = 0;
+        int operationsChecked = 0; // 性能限制计数器
+
         for (int i = 0; i < 6; i++) {
+            if (operationsChecked >= MAX_STACKS_CHECKED_PER_TICK) break;
+
             ItemStack diskStack = itemHandler.getStackInSlot(i);
             if (!diskStack.isEmpty() && diskStack.getItem() instanceof IStorageDiskProvider provider && provider.isValid(diskStack)) {
                 try {
-                    IStorageDisk disk = api.getStorageDiskManager(level).get(provider.getId(diskStack));
+                    IStorageDisk<FluidStack> disk = (IStorageDisk<FluidStack>) api.getStorageDiskManager(level).get(provider.getId(diskStack));
                     if (disk == null) continue;
-                    Collection stacks = disk.getStacks();
+                    var stacks = disk.getStacks();
                     for (Object obj : new ArrayList<>(stacks)) {
+                        if (operationsChecked >= MAX_STACKS_CHECKED_PER_TICK) break;
+                        operationsChecked++;
+
                         if (!(obj instanceof FluidStack stackInDisk) || stackInDisk.isEmpty()) continue;
                         FluidStack toInsert = stackInDisk.copy();
                         for (IFluidHandler target : targets) {
@@ -558,9 +661,18 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
         return movedCount;
     }
 
+    // 核心修改：Capability 分流
     @Override
     public <T> @NotNull LazyOptional<T> getCapability(@NotNull Capability<T> cap, @Nullable Direction side) {
-        if (cap == ForgeCapabilities.ITEM_HANDLER) return lazyItemHandler.cast();
+        if (cap == ForgeCapabilities.ITEM_HANDLER) {
+            // side != null 代表自动化访问，返回完全拒绝的 handler
+            // side == null 代表 GUI/内部访问，返回正常逻辑的 handler
+            if (side != null) {
+                return lazyAutomationItemHandler.cast();
+            } else {
+                return lazyItemHandler.cast();
+            }
+        }
         return super.getCapability(cap, side);
     }
 
@@ -568,12 +680,14 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
     public void onLoad() {
         super.onLoad();
         lazyItemHandler = LazyOptional.of(() -> itemHandler);
+        lazyAutomationItemHandler = LazyOptional.of(() -> automationItemHandler);
     }
 
     @Override
     public void invalidateCaps() {
         super.invalidateCaps();
         lazyItemHandler.invalidate();
+        lazyAutomationItemHandler.invalidate();
     }
 
     @Override
@@ -647,6 +761,7 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
             return;
         }
         sideConfig ^= (1 << dir.ordinal());
+        needCacheUpdate = true; // 缓存失效
         setChanged();
     }
 
@@ -655,6 +770,7 @@ public class DiskMoverBlockEntity extends BlockEntity implements MenuProvider {
             return;
         }
         sideConfig = 0;
+        needCacheUpdate = true; // 缓存失效
         setChanged();
     }
 }
