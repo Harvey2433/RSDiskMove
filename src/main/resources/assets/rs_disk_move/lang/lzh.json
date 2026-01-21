@@ -9,9 +9,9 @@
   "gui.rs_disk_move.finished": "毕",
   "gui.rs_disk_move.idle": "静候",
   "gui.rs_disk_move.progress_format": "%s%% (%s / %s)",
-  "gui.rs_disk_move.config_tooltip": "出入方位配置",
+  "gui.rs_disk_move.config_tooltip": "诸面出入之设",
 
-  "gui.rs_disk_move.config.title": "输出方位设",
+  "gui.rs_disk_move.config.title": "输出诸面之设",
   "gui.rs_disk_move.config.disable_all": "阖闭诸输出面",
   "gui.rs_disk_move.config.back": "返",
 
@@ -26,7 +26,7 @@
   "message.rs_disk_move.paused_no_item_container": "无物什受器可用",
   "message.rs_disk_move.paused_no_fluid_container": "无流质受器可用",
 
-  "message.rs_disk_move.error_no_output": "启败：未设输出方位",
+  "message.rs_disk_move.error_no_output": "启败：未设输出面",
   "message.rs_disk_move.error_empty_disk": "启败：磁盘空",
   "message.rs_disk_move.error_no_item_container": "启败：无物什受器",
   "message.rs_disk_move.error_no_fluid_container": "启败：无流质受器"
