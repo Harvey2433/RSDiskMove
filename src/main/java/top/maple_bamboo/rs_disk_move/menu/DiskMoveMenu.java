@@ -1,129 +1,132 @@
-package top.maple_bamboo.rs_disk_move.client;
+package top.maple_bamboo.rs_disk_move.menu;
 
-import com.mojang.blaze3d.systems.RenderSystem;
-import net.minecraft.client.gui.GuiGraphics;
-import net.minecraft.client.gui.components.Button;
-import net.minecraft.client.gui.components.Tooltip;
-import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
-import net.minecraft.network.chat.Component;
-import net.minecraft.resources.ResourceLocation;
+import com.refinedmods.refinedstorage.api.storage.disk.IStorageDiskProvider;
+import net.minecraft.core.BlockPos;
 import net.minecraft.world.entity.player.Inventory;
-import net.minecraft.util.Mth;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.inventory.*;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraftforge.items.SlotItemHandler;
+import org.jetbrains.annotations.NotNull;
 import top.maple_bamboo.rs_disk_move.RSDiskMove;
-import top.maple_bamboo.rs_disk_move.menu.DiskMoveMenu;
-import top.maple_bamboo.rs_disk_move.network.MoveActionPacket;
-import top.maple_bamboo.rs_disk_move.network.OpenGuiPacket;
-import top.maple_bamboo.rs_disk_move.network.PacketHandler;
+import top.maple_bamboo.rs_disk_move.block.DiskMoverBlockEntity;
 
-public class DiskMoveScreen extends AbstractContainerScreen<DiskMoveMenu> {
-    private static final ResourceLocation TEXTURE = new ResourceLocation(RSDiskMove.MOD_ID, "textures/gui/disk_move.png");
-    private Button transferBtn;
+public class DiskMoveMenu extends AbstractContainerMenu {
+    private final DiskMoverBlockEntity blockEntity;
+    private final ContainerLevelAccess levelAccess;
+    private final ContainerData data;
 
-    public DiskMoveScreen(DiskMoveMenu pMenu, Inventory pPlayerInventory, Component pTitle) {
-        super(pMenu, pPlayerInventory, pTitle);
-        this.imageWidth = 185;
-        this.imageHeight = 256;
-        this.titleLabelY = -1000;
-        this.inventoryLabelY = -1000;
+    public DiskMoveMenu(int pContainerId, Inventory inv, BlockPos pos) {
+        this(pContainerId, inv, pos, new SimpleContainerData(6));
     }
 
-    @Override
-    protected void init() {
-        super.init();
+    public DiskMoveMenu(int pContainerId, Inventory inv, BlockPos pos, ContainerData data) {
+        super(RSDiskMove.DISK_MOVER_MENU.get(), pContainerId);
+        this.levelAccess = ContainerLevelAccess.create(inv.player.level(), pos);
+        this.data = data;
 
-        this.transferBtn = Button.builder(Component.literal("Start"), button -> {
-            PacketHandler.sendToServer(new MoveActionPacket(this.menu.getBlockPos()));
-        }).bounds(this.leftPos + 85, this.topPos + 68, 80, 20).build();
-        this.addRenderableWidget(transferBtn);
-
-        Button configBtn = Button.builder(Component.literal("Config"), button -> {
-            PacketHandler.sendToServer(new OpenGuiPacket(this.menu.getBlockPos(), 1));
-        }).bounds(this.leftPos + this.imageWidth, this.topPos + 5, 50, 20).build();
-        configBtn.setTooltip(Tooltip.create(Component.literal("Configure I/O Sides")));
-        this.addRenderableWidget(configBtn);
-    }
-
-    @Override
-    protected void containerTick() {
-        super.containerTick();
-        // 动态更新按钮文字
-        if (this.menu.getData().get(1) == 1) {
-            this.transferBtn.setMessage(Component.literal("Stop"));
+        BlockEntity be = inv.player.level().getBlockEntity(pos);
+        if (be instanceof DiskMoverBlockEntity diskMover) {
+            this.blockEntity = diskMover;
         } else {
-            // 如果完成了，显示 Finished，否则显示 Start / Resume
-            long total = this.menu.getTotalItems();
-            long moved = this.menu.getMovedItems();
-            if (total > 0 && moved >= total) {
-                this.transferBtn.setMessage(Component.literal("Finished"));
-            } else if (total > 0 && moved > 0) {
-                this.transferBtn.setMessage(Component.literal("Resume"));
-            } else {
-                this.transferBtn.setMessage(Component.literal("Start"));
+            throw new IllegalStateException("Menu bound to wrong block entity at " + pos);
+        }
+
+        // --- 机器槽位 (0 - 5) ---
+        for (int i = 0; i < 6; i++) {
+            this.addSlot(new SlotItemHandler(this.blockEntity.getItemHandler(), i, 28, 25 + i * 18) {
+                // 1. 禁止拿取逻辑：机器运行时锁死
+                @Override
+                public boolean mayPickup(Player playerIn) {
+                    return data.get(1) == 0 && super.mayPickup(playerIn);
+                }
+
+                // 2. 限制输入逻辑：机器停止 + 必须是 RS 磁盘
+                @Override
+                public boolean mayPlace(@NotNull ItemStack stack) {
+                    boolean isMachineStopped = data.get(1) == 0;
+                    // 使用 RS API 判断是否为磁盘 (兼容物品盘、流体盘、创造盘等)
+                    boolean isRsDisk = stack.getItem() instanceof IStorageDiskProvider;
+
+                    return isMachineStopped && isRsDisk && super.mayPlace(stack);
+                }
+            });
+        }
+
+        // --- 玩家背包 (6 - 32) ---
+        int startX = 12;
+        int invY = 174;
+        int hotbarY = 232;
+
+        for (int i = 0; i < 3; ++i) {
+            for (int l = 0; l < 9; ++l) {
+                this.addSlot(new Slot(inv, l + i * 9 + 9, startX + l * 18, invY + i * 18));
             }
         }
+
+        // --- 玩家快捷栏 (33 - 41) ---
+        for (int i = 0; i < 9; ++i) {
+            this.addSlot(new Slot(inv, i, startX + i * 18, hotbarY));
+        }
+
+        addDataSlots(data);
+    }
+
+    public BlockPos getBlockPos() { return this.blockEntity.getBlockPos(); }
+    public ContainerData getData() { return this.data; }
+
+    public long getTotalItems() {
+        return ((long) data.get(3) << 32) | ((long) data.get(2) & 0xFFFFFFFFL);
+    }
+
+    public long getMovedItems() {
+        return ((long) data.get(5) << 32) | ((long) data.get(4) & 0xFFFFFFFFL);
+    }
+
+    // --- 3. 快速移动逻辑 (Shift + 左键) ---
+    @Override
+    public ItemStack quickMoveStack(Player playerIn, int index) {
+        ItemStack sourceStack = ItemStack.EMPTY;
+        Slot sourceSlot = this.slots.get(index);
+
+        if (sourceSlot != null && sourceSlot.hasItem()) {
+            ItemStack stackInSlot = sourceSlot.getItem();
+            sourceStack = stackInSlot.copy();
+
+            // 如果点击的是机器槽位 (0-5) -> 移入玩家背包
+            if (index < 6) {
+                // 参数: stack, startId, endId, reverse(true=优先放快捷栏)
+                if (!this.moveItemStackTo(stackInSlot, 6, 42, true)) {
+                    return ItemStack.EMPTY;
+                }
+            }
+            // 如果点击的是玩家背包 (6-41) -> 移入机器槽位
+            else {
+                // moveItemStackTo 会自动调用我们上面重写的 mayPlace
+                // 所以如果不是磁盘，或者机器正在运行，这里会自动失败，不用额外写判断
+                if (!this.moveItemStackTo(stackInSlot, 0, 6, false)) {
+                    return ItemStack.EMPTY;
+                }
+            }
+
+            if (stackInSlot.isEmpty()) {
+                sourceSlot.set(ItemStack.EMPTY);
+            } else {
+                sourceSlot.setChanged();
+            }
+
+            if (stackInSlot.getCount() == sourceStack.getCount()) {
+                return ItemStack.EMPTY;
+            }
+
+            sourceSlot.onTake(playerIn, stackInSlot);
+        }
+        return sourceStack;
     }
 
     @Override
-    protected void renderBg(GuiGraphics guiGraphics, float partialTick, int mouseX, int mouseY) {
-        RenderSystem.setShaderTexture(0, TEXTURE);
-        int relX = (this.width - this.imageWidth) / 2;
-        int relY = (this.height - this.imageHeight) / 2;
-
-        guiGraphics.blit(TEXTURE, relX, relY, 0, 0, this.imageWidth, this.imageHeight);
-
-        // 箭头
-        for (int i = 0; i < 6; i++) {
-            int slotY = 25 + i * 18 + 5;
-            guiGraphics.drawString(this.font, ">>>", relX + 48, relY + slotY, 0x404040, false);
-        }
-
-        // --- 进度条绘制 ---
-        long total = this.menu.getTotalItems();
-        long moved = this.menu.getMovedItems();
-
-        // 进度条位置：背包上方，槽位下方
-        int barX = relX + 12;
-        int barY = relY + 155;
-        int barWidth = 162;
-        int barHeight = 10;
-
-        // 绘制背景 (灰色)
-        guiGraphics.fill(barX, barY, barX + barWidth, barY + barHeight, 0xFF555555);
-
-        if (total > 0) {
-            // 计算进度比例
-            float progress = (float) ((double) moved / (double) total);
-            progress = Mth.clamp(progress, 0.0f, 1.0f);
-            int fillWidth = (int) (barWidth * progress);
-
-            // 绘制填充 (绿色)
-            guiGraphics.fill(barX, barY, barX + fillWidth, barY + barHeight, 0xFF00AA00);
-
-            // 绘制文字信息 (居中)
-            String progressText = String.format("%d%% (%s / %s)", (int)(progress * 100), readableNum(moved), readableNum(total));
-            int textWidth = this.font.width(progressText);
-            int textX = barX + (barWidth - textWidth) / 2;
-            int textY = barY + 1;
-
-            guiGraphics.drawString(this.font, progressText, textX, textY, 0xFFFFFFFF, true);
-        } else {
-            // 没有任务时显示 Idle
-            String text = "Idle";
-            guiGraphics.drawString(this.font, text, barX + (barWidth - this.font.width(text)) / 2, barY + 1, 0xFFAAAAAA, true);
-        }
-    }
-
-    // 辅助方法：格式化大数字 (如 1.2M)
-    private String readableNum(long val) {
-        if (val < 1000) return String.valueOf(val);
-        if (val < 1000000) return String.format("%.1fk", val / 1000.0);
-        return String.format("%.1fM", val / 1000000.0);
-    }
-
-    @Override
-    public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {
-        this.renderBackground(guiGraphics);
-        super.render(guiGraphics, mouseX, mouseY, partialTick);
-        this.renderTooltip(guiGraphics, mouseX, mouseY);
+    public boolean stillValid(Player pPlayer) {
+        return stillValid(levelAccess, pPlayer, RSDiskMove.DISK_MOVER_BLOCK.get());
     }
 }

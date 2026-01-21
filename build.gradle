@@ -139,6 +139,10 @@ repositories {
     // flatDir {
     //     dir 'libs'
     // }
+    maven { url "https://cursemaven.com" }
+    flatDir {
+        dirs 'libs'
+    }
 }
 
 dependencies {
@@ -163,6 +167,9 @@ dependencies {
     // For more info:
     // http://www.gradle.org/docs/current/userguide/artifact_dependencies_tutorial.html
     // http://www.gradle.org/docs/current/userguide/dependency_management.html
+
+    annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
+    implementation fg.deobf("com.refinedmods:refinedstorage:1.12.4")
 
     annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
 

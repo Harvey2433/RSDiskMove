@@ -61,3 +61,10 @@ mandatory = true
 versionRange = "${minecraft_version_range}"
 ordering = "NONE"
 side = "BOTH"
+
+[[dependencies."${mod_id}"]]
+modId = "refinedstorage"
+mandatory = true             # 强制要求，如果不装 RS 则无法启动游戏
+versionRange = "[1.12.0,)"   # 允许 1.12.0 及以上版本
+ordering = "AFTER"           # 确保 RS 先加载
+side = "BOTH"

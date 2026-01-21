@@ -1,0 +1,7 @@
+{
+  "variants": {
+    "": {
+      "model": "rs_disk_move:block/disk_mover"
+    }
+  }
+}
