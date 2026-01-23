@@ -48,8 +48,9 @@ public class RSDiskMove {
     public static final DeferredRegister<MenuType<?>> MENUS = DeferredRegister.create(ForgeRegistries.MENU_TYPES, MOD_ID);
 
     public static final RegistryObject<Block> DISK_MOVER_BLOCK = BLOCKS.register("disk_mover",
-            () -> new DiskMoverBlock(BlockBehaviour.Properties.of().mapColor(MapColor.METAL).strength(2.0f)
-                    .lightLevel(state -> state.getValue(DiskMoverBlock.LIT) ? 15 : 0))); // 修改：根据 LIT 状态设置亮度
+            () -> new DiskMoverBlock(BlockBehaviour.Properties.of().mapColor(MapColor.METAL).strength(5.5f)
+                    .lightLevel(state -> state.getValue(DiskMoverBlock.LIT) ? 15 : 0) // 修改：根据 LIT 状态设置亮度
+                    .requiresCorrectToolForDrops()));
 
     public static final RegistryObject<Item> DISK_MOVER_ITEM = ITEMS.register("disk_mover",
             () -> new BlockItem(DISK_MOVER_BLOCK.get(), new Item.Properties()));

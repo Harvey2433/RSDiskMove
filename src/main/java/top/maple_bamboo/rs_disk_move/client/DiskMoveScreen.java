@@ -17,7 +17,7 @@ import top.maple_bamboo.rs_disk_move.network.OpenGuiPacket;
 import top.maple_bamboo.rs_disk_move.network.PacketHandler;
 
 public class DiskMoveScreen extends AbstractContainerScreen<DiskMoveMenu> {
-    private static final ResourceLocation TEXTURE =     new ResourceLocation(RSDiskMove.MOD_ID, "textures/gui/disk_move.png");
+    private static final ResourceLocation TEXTURE = new ResourceLocation(RSDiskMove.MOD_ID, "textures/gui/disk_move.png");
     // 齿轮图标纹理
     private static final ResourceLocation SETTINGS_TEXTURE = new ResourceLocation(RSDiskMove.MOD_ID, "textures/gui/settings.png");
 
